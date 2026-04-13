@@ -1,0 +1,212 @@
+#include <WiFiS3.h>
+#include <DFRobot_PH.h>
+#include <DTH_Turbidity.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+#include <EEPROM.h>
+#include <RadioLib.h> // Added LoRa Library
+
+// WiFi credentials
+const char* ssid = "Galaxy A25 5G 645A"; 
+const char* pass = "akmal789";
+int status = WL_IDLE_STATUS;
+
+// --- LoRa Pins for Arduino R4 ---
+#define LORA_CS    10  
+#define LORA_DIO0  9   
+#define LORA_RST   8   
+SX1278 lora = new Module(LORA_CS, LORA_DIO0, LORA_RST, -1);
+
+// Sensor pins
+#define PH_PIN A2
+#define ONE_WIRE_BUS 4
+#define TURBIDITY_SENSOR_PIN A0
+#define TDS_SENSOR_PIN A1
+#define VREF 5.0
+#define SCOUNT 30  
+
+// Sensor objects
+DFRobot_PH ph;
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
+DTH_Turbidity turbSensor(TURBIDITY_SENSOR_PIN);
+
+// WiFi client
+WiFiClient client;
+
+// Variables to store sensor readings
+float voltage, phValue, temperature;
+float ntu_val = 0;
+float tdsValue = 0;
+float averageVoltage = 0;
+int analogBuffer[SCOUNT];
+int analogBufferTemp[SCOUNT];
+int analogBufferIndex = 0, copyIndex = 0;
+char cmd[10];  
+
+// Server details
+char HOST_NAME[] = "10.219.98.177";  
+int HTTP_PORT = 5000;
+String PATH_NAME = "/ecowatch/insert_data.php";  
+
+void setup() {
+    Serial.begin(115200);
+    ph.begin();
+    sensors.begin();
+    pinMode(TDS_SENSOR_PIN, INPUT);
+
+    // --- Initialize LoRa ---
+    Serial.print(F("[SX1278] Initializing ... "));
+    int loraState = lora.begin(433.0);
+    if (loraState == RADIOLIB_ERR_NONE) {
+        lora.setSyncWord(0x12);
+        lora.setSpreadingFactor(7);
+        lora.setBandwidth(125.0);
+        Serial.println(F("LoRa success!"));
+    } else {
+        Serial.print(F("LoRa failed, code "));
+        Serial.println(loraState);
+    }
+
+    // Connect to WiFi
+    while (status != WL_CONNECTED) {
+        Serial.print("Attempting to connect to SSID: ");
+        Serial.println(ssid);
+        status = WiFi.begin(ssid, pass);
+        delay(10000);
+    }
+
+    Serial.println("Connected to WiFi");
+    printWifiStatus();
+}
+
+void loop() {
+    static unsigned long timepoint = millis();
+    if (millis() - timepoint > 1000U) {  
+        timepoint = millis();
+
+        // Read sensors
+        sensors.requestTemperatures();
+        temperature = sensors.getTempCByIndex(0);
+
+        voltage = analogRead(PH_PIN) / 1024.0 * 5000;
+        phValue = ph.readPH(voltage, temperature);
+        
+        ntu_val = turbSensor.readTurbidity();
+        readTDS();
+
+        // 1. Original WiFi/Server Upload
+        sendDataToServer();
+
+        // 2. Added LoRa Transmission
+        String loraPacket = String(temperature, 1) + "," + 
+                            String(phValue, 2) + "," + 
+                            String(ntu_val, 1) + "," + 
+                            String(tdsValue, 0);
+        
+        Serial.print(F("LoRa Sending: "));
+        Serial.println(loraPacket);
+        lora.transmit(loraPacket);
+    }
+
+    if (readSerial(cmd)) {
+        toUpperCase(cmd);
+        if (strstr(cmd, "PH")) {
+            ph.calibration(voltage, temperature, cmd);
+        }
+    }
+}
+
+void readTDS() {
+    static unsigned long analogSampleTimepoint = millis();
+    if (millis() - analogSampleTimepoint > 40U) {
+        analogSampleTimepoint = millis();
+        analogBuffer[analogBufferIndex] = analogRead(TDS_SENSOR_PIN);
+        analogBufferIndex++;
+        if (analogBufferIndex == SCOUNT) analogBufferIndex = 0;
+    }
+
+    for (copyIndex = 0; copyIndex < SCOUNT; copyIndex++)
+        analogBufferTemp[copyIndex] = analogBuffer[copyIndex];
+    averageVoltage = getMedianNum(analogBufferTemp, SCOUNT) * (float)VREF / 1024.0;
+    float compensationCoefficient = 1.0 + 0.02 * (temperature - 25.0);
+    float compensationVoltage = averageVoltage / compensationCoefficient;
+    tdsValue = (133.42 * compensationVoltage * compensationVoltage * compensationVoltage
+                - 255.86 * compensationVoltage * compensationVoltage
+                + 857.39 * compensationVoltage) * 0.5;
+}
+
+void sendDataToServer() {
+    String queryString = "?temperature=" + String(temperature)
+                         + "&ph_value=" + String(phValue)
+                         + "&ntu_value=" + String(ntu_val)
+                         + "&tds_value=" + String(tdsValue);
+
+    if (client.connect(HOST_NAME, HTTP_PORT)) {
+        Serial.println("Connected to server");
+        client.println("GET " + PATH_NAME + queryString + " HTTP/1.1");
+        client.println("Host: " + String(HOST_NAME));
+        client.println("Connection: close");
+        client.println();
+
+        while (client.connected()) {
+            if (client.available()) {
+                char c = client.read();
+                Serial.print(c);
+            }
+        }
+        client.stop();
+        Serial.println("\nDisconnected from server");
+    } else {
+        Serial.println("Connection to server failed");
+    }
+}
+
+bool readSerial(char result[]) {
+    static int i = 0;
+    while (Serial.available() > 0) {
+        char inChar = Serial.read();
+        if (inChar == '\n') {
+            result[i] = '\0';
+            i = 0;
+            return true;
+        }
+        if (inChar != '\r') {
+            result[i] = inChar;
+            i++;
+        }
+        delay(1);
+    }
+    return false;
+}
+
+void toUpperCase(char* str) {
+    if (str == NULL) return;
+    for (int i = 0; str[i] != '\0'; i++) {
+        str[i] = toupper(str[i]);
+    }
+}
+
+int getMedianNum(int bArray[], int iFilterLen) {
+    int bTab[iFilterLen];
+    for (byte i = 0; i < iFilterLen; i++) bTab[i] = bArray[i];
+    int i, j, bTemp;
+    for (j = 0; j < iFilterLen - 1; j++) {
+        for (i = 0; i < iFilterLen - j - 1; i++) {
+            if (bTab[i] > bTab[i + 1]) {
+                bTemp = bTab[i];
+                bTab[i] = bTab[i + 1];
+                bTab[i + 1] = bTemp;
+            }
+        }
+    }
+    return (iFilterLen & 1) ? bTab[(iFilterLen - 1) / 2] : (bTab[iFilterLen / 2] + bTab[iFilterLen / 2 - 1]) / 2;
+}
+
+void printWifiStatus() {
+    Serial.print("IP Address: ");
+    Serial.println(WiFi.localIP());
+    Serial.print("Signal strength (RSSI): ");
+    Serial.print(WiFi.RSSI());
+    Serial.println(" dBm");
+}
