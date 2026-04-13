@@ -1,0 +1,70 @@
+#include <RadioLib.h>
+
+// Pins for ESP32
+#define LORA_CS    5   
+#define LORA_DIO0  2   
+#define LORA_RST   4   
+
+SX1278 lora = new Module(LORA_CS, LORA_DIO0, LORA_RST, -1);
+
+// Timer variables to slow down the display
+unsigned long lastDisplayTime = 0;
+const unsigned long displayInterval = 3000; // Show data every 3 seconds
+
+void setup() {
+  Serial.begin(115200);
+  delay(2000);
+
+  Serial.println(F("--- ESP32 LoRa Receiver (Stable Mode) ---"));
+
+  int state = lora.begin(433.0);
+  if (state == RADIOLIB_ERR_NONE) {
+    lora.setSyncWord(0x12);
+    lora.setSpreadingFactor(7);
+    lora.setBandwidth(125.0);
+    Serial.println(F("LoRa Initialized. Waiting for R4..."));
+  } else {
+    Serial.print(F("Failed, code "));
+    Serial.println(state);
+    while (true);
+  }
+
+  lora.startReceive();
+}
+
+void loop() {
+  String str;
+  int state = lora.readData(str);
+
+  // If a packet arrives...
+  if (state == RADIOLIB_ERR_NONE) {
+    
+    // ONLY print to the screen if 3 seconds have passed
+    if (millis() - lastDisplayTime >= displayInterval) {
+      lastDisplayTime = millis();
+
+      Serial.println(F("\n========================="));
+      Serial.print(F("Time: ")); Serial.println(millis() / 1000);
+      Serial.print(F("Raw:  ")); Serial.println(str);
+
+      // Simple Parsing
+      int firstComma = str.indexOf(',');
+      int secondComma = str.indexOf(',', firstComma + 1);
+      int thirdComma = str.indexOf(',', secondComma + 1);
+
+      if (firstComma != -1 && secondComma != -1 && thirdComma != -1) {
+        Serial.println(F("--- Sensor Readings ---"));
+        Serial.print(F(" Temp: ")); Serial.print(str.substring(0, firstComma)); Serial.println(" C");
+        Serial.print(F(" pH:   ")); Serial.println(str.substring(firstComma + 1, secondComma));
+        Serial.print(F(" Turb: ")); Serial.print(str.substring(secondComma + 1, thirdComma)); Serial.println(" NTU");
+        Serial.print(F(" TDS:  ")); Serial.print(str.substring(thirdComma + 1)); Serial.println(" ppm");
+      }
+      
+      Serial.print(F("Signal: ")); Serial.print(lora.getRSSI()); Serial.println(F(" dBm"));
+      Serial.println(F("========================="));
+    }
+
+    // Always restart listening immediately after reading data
+    lora.startReceive();
+  }
+}
