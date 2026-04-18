@@ -7,8 +7,8 @@
 #include <RadioLib.h> // Added LoRa Library
 
 // WiFi credentials
-const char* ssid = "Galaxy A25 5G 645A"; 
-const char* pass = "akmal789";
+const char* ssid = "POCO X6 Pro 5G"; 
+const char* pass = "aqifaddin";
 int status = WL_IDLE_STATUS;
 
 // --- LoRa Pins for Arduino R4 ---
@@ -45,9 +45,9 @@ int analogBufferIndex = 0, copyIndex = 0;
 char cmd[10];  
 
 // Server details
-char HOST_NAME[] = "10.219.98.177";  
-int HTTP_PORT = 5000;
-String PATH_NAME = "/ecowatch/insert_data.php";  
+char HOST_NAME[] = "10.137.61.177";  
+int HTTP_PORT = 80;
+String PATH_NAME = "/api/insert-data";  
 
 void setup() {
     Serial.begin(115200);
@@ -82,7 +82,7 @@ void setup() {
 
 void loop() {
     static unsigned long timepoint = millis();
-    if (millis() - timepoint > 1000U) {  
+    if (millis() - timepoint > 10000U) {  
         timepoint = millis();
 
         // Read sensors
@@ -137,19 +137,27 @@ void readTDS() {
 }
 
 void sendDataToServer() {
-    String queryString = "?temperature=" + String(temperature)
-                         + "&ph_value=" + String(phValue)
-                         + "&ntu_value=" + String(ntu_val)
-                         + "&tds_value=" + String(tdsValue);
+    // 1. Update the names to match Python's: temp, ph, turb, tds
+    String queryString = "?temp=" + String(temperature)
+                         + "&ph=" + String(phValue)
+                         + "&turb=" + String(ntu_val)
+                         + "&tds=" + String(tdsValue);
 
     if (client.connect(HOST_NAME, HTTP_PORT)) {
         Serial.println("Connected to server");
+        
+        // 2. Send the Request
         client.println("GET " + PATH_NAME + queryString + " HTTP/1.1");
         client.println("Host: " + String(HOST_NAME));
+        
+        // 3. IMPORTANT: Add the ngrok skip header
+        client.println("ngrok-skip-browser-warning: true"); 
+        
         client.println("Connection: close");
         client.println();
 
-        while (client.connected()) {
+        // 4. Read the Response
+        while (client.connected() || client.available()) {
             if (client.available()) {
                 char c = client.read();
                 Serial.print(c);
